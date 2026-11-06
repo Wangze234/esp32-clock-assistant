@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# 第三方资料与大文件（保留在本地，不纳入版本管理）
+# data/ 里是厂商提供的原理图、规格书和几十 MB 的压缩包
+data/
+
+# 密钥（只提交 secrets.example.h）
+firmware/**/secrets.h
+
+# 编译产物
+firmware/**/build/
+*.elf
+*.map
+
+# IDE / 编辑器
+.vscode/
+.arduinoIDE/
