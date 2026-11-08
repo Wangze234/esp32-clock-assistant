@@ -8,7 +8,10 @@
 
 // 和风天气 https://dev.qweather.com/
 #define QWEATHER_KEY    "你的API_KEY"
-#define QWEATHER_CITY   "101010100"   // 北京；换成自己城市 ID
+// 自动定位失败时的兜底城市 ID（北京 101010100）；平时用公网 IP 自动定位
+#define QWEATHER_CITY   "101010100"
+// 可选：1 = 自动定位（默认），0 = 只用上面的 QWEATHER_CITY
+// #define QWEATHER_AUTO_LOCATION 0
 // 2024 之后新版和风天气要求用"专属 API Host"（控制台首页能看到），
 // 形如 xxxxxxxx.re.qweatherapi.com，不能再用 devapi.qweather.com
 #define QWEATHER_HOST   "你的专属ApiHost.re.qweatherapi.com"

@@ -27,6 +27,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <Preferences.h>    // NVS：缓存天气 + 记住定位结果
 #include <time.h>
 #include <TFT_eSPI.h>
 #include <miniz.h>          // ROM 里的 tinfl，用来解 gzip（见 wxGet 注释）
@@ -81,6 +82,8 @@ static uint32_t g_attemptAt    = 0;
 static uint32_t g_nextTryAt    = 0;
 static uint32_t g_bootAt       = 0;
 static bool     g_statusDirty  = true;
+// 天气区需要重画的标记（WiFi 状态变化 / 拿到新数据时置位）
+static volatile bool g_wxDirty = true;
 
 // ============================================================
 // WiFi：只发起连接，不等结果
@@ -105,6 +108,7 @@ static void wifiService() {
       Serial.println(g_timeWasValid ? "NTP: re-syncing after reconnect ..."
                                     : "NTP: requesting time ...");
       g_statusDirty = true;
+      g_wxDirty = true;        // 顶栏的 OFF 要恢复成 RH
     }
     return;
   }
@@ -113,6 +117,7 @@ static void wifiService() {
     g_wasConnected = false;
     Serial.printf("[wifi] lost (status %d)\n", WiFi.status());
     g_statusDirty = true;
+    g_wxDirty = true;          // 顶栏的 RH 要变成 OFF
   }
 
   uint32_t now = millis();
@@ -217,29 +222,62 @@ static void drawTimeBig(const char* s) {
 // ============================================================
 // 天气数据（后台任务写、loop 读，用临界区保护）
 // ============================================================
+struct WxDay {
+  int  tmax;          // 最高 ℃
+  int  tmin;          // 最低 ℃
+  int  icon;          // 白天图标编号
+  char text[16];      // 天气现象（中文，只打串口）
+};
+
 struct WeatherData {
   bool     valid;
   int      temp;      // 当前温度 ℃
   int      hum;       // 相对湿度 %
-  int      tmax;      // 今日最高 ℃
-  int      tmin;      // 今日最低 ℃
-  int      icon;      // 和风天气图标编号，如 100 / 104 / 305
+  int      icon;      // 当前天气图标编号，如 100 / 104 / 305
   char     text[24];  // 天气现象（中文，只打串口）
+  WxDay    day[3];    // 今天 / 明天 / 后天
+  uint32_t stamp;     // 数据时间（time_t）
 };
 
 static WeatherData g_wx;
 static portMUX_TYPE g_wxMux = portMUX_INITIALIZER_UNLOCKED;
-static volatile bool g_wxDirty = true;
 
 static const uint32_t WX_REFRESH_MS  = 30UL * 60 * 1000;   // 正常 30 分钟一次
 static const uint32_t WX_RETRY_MS    = 60UL * 1000;        // 失败 1 分钟后重试
 
-// 从 JSON 里取 "key":"值" 的字符串值；找不到返回 false
+// ---- NVS ----
+// wx  = WeatherData 二进制缓存（断网开机也能先显示上次的数据）
+// loc = 自动定位解析出的 "经度,纬度"，第二次开机直接复用，不再访问 ipinfo
+static const char*    NVS_NS        = "clock";
+static const char*    NVS_WX        = "wx";
+static const char*    NVS_WX_MAGIC  = "wxmagic";
+static const char*    NVS_LOC       = "loc";
+static const uint32_t WX_CACHE_MAGIC = 0x57583031;          // "WX01"，换结构体就改它
+
+// 实际用于请求的城市/坐标（任务里初始化，任务外只读）
+static String g_location = QWEATHER_CITY;
+
+#ifndef QWEATHER_AUTO_LOCATION
+#define QWEATHER_AUTO_LOCATION 1     // 1 = 按公网 IP 自动定位；0 = 只用 QWEATHER_CITY
+#endif
+
+// 从 JSON 里取 "key":"值" 的字符串值；找不到返回 false。
+// 注意要和风天气是紧凑格式，而 ipinfo.io 是带空格和换行的美化格式（"loc": "..."），
+// 所以冒号前后允许空白。
 static bool jsonStr(const String& j, const char* key, char* out, size_t n) {
-  String pat = String("\"") + key + "\":\"";
+  String pat = String("\"") + key + "\"";
   int p = j.indexOf(pat);
   if (p < 0) return false;
   p += pat.length();
+  auto skipWs = [&]() {
+    while (p < (int)j.length() && (j[p] == ' ' || j[p] == '\t' || j[p] == '\r' || j[p] == '\n')) p++;
+  };
+  skipWs();
+  if (p >= (int)j.length() || j[p] != ':') return false;
+  p++;
+  skipWs();
+  if (p >= (int)j.length() || j[p] != '"') return false;
+  p++;
   int e = j.indexOf('"', p);
   if (e < 0) return false;
   size_t len = (size_t)(e - p);
@@ -326,31 +364,137 @@ static bool wxGet(const char* path, String& body) {
 }
 
 static bool wxFetch(WeatherData& w) {
-  char path[96];
+  char path[110];
   String body;
 
   // 1) 实时天气
-  snprintf(path, sizeof(path), "/v7/weather/now?location=%s", QWEATHER_CITY);
+  snprintf(path, sizeof(path), "/v7/weather/now?location=%s", g_location.c_str());
   if (!wxGet(path, body)) return false;
   w.temp = jsonInt(body, "temp", 0);
   w.hum  = jsonInt(body, "humidity", 0);
   w.icon = jsonInt(body, "icon", 999);
   jsonStr(body, "text", w.text, sizeof(w.text));
-  int code = jsonInt(body, "code", 0);
-  if (code != 200) { Serial.printf("[wx] now code=%d\n", code); return false; }
 
-  // 2) 今日高低温（3 天预报里的第一天）
-  snprintf(path, sizeof(path), "/v7/weather/3d?location=%s", QWEATHER_CITY);
+  // 2) 未来 3 天（含今天）
+  snprintf(path, sizeof(path), "/v7/weather/3d?location=%s", g_location.c_str());
   if (!wxGet(path, body)) return false;
-  w.tmax = jsonInt(body, "tempMax", w.temp);
-  w.tmin = jsonInt(body, "tempMin", w.temp);
 
+  // daily[] 里每个对象都以 "fxDate":" 开头，按它把 3 天切成 3 段再各取各的字段
+  int pos[3], p = -1;
+  for (int i = 0; i < 3; i++) {
+    p = body.indexOf("\"fxDate\":\"", p + 1);
+    if (p < 0) { Serial.println("[wx] 3d: less than 3 days"); return false; }
+    pos[i] = p;
+  }
+  for (int i = 0; i < 3; i++) {
+    int end = (i < 2) ? pos[i + 1] : (int)body.length();
+    String seg = body.substring(pos[i], end);
+    w.day[i].tmax = jsonInt(seg, "tempMax", w.temp);
+    w.day[i].tmin = jsonInt(seg, "tempMin", w.temp);
+    w.day[i].icon = jsonInt(seg, "iconDay", w.icon);
+    jsonStr(seg, "textDay", w.day[i].text, sizeof(w.day[i].text));
+  }
+
+  w.stamp = (uint32_t)time(nullptr);
   w.valid = true;
   return true;
 }
 
+// ============================================================
+// 自动定位 + NVS 缓存
+// ============================================================
+// 用公网出口 IP 查城市坐标（ipinfo.io 免费、HTTPS、返回 "loc":"纬度,经度"）。
+// 和风天气的 GeoAPI 在本账号上是 403（套餐没开），但 /v7/weather 直接接受
+// "经度,纬度"（最多两位小数），所以不需要 GeoAPI。
+static bool geoLookup(String& locOut) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setTimeout(8000);
+  http.setConnectTimeout(6000);
+  if (!http.begin(client, "ipinfo.io", 443, "/json", true)) return false;
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[geo] ipinfo http %d\n", code);
+    http.end();
+    return false;
+  }
+  String raw = http.getString();
+  http.end();
+
+  String body;
+  if (!gunzipBody(raw, body)) return false;
+
+  // ipinfo.io 返回的是美化 JSON（"loc": "39.9110,116.3950"，冒号后有空格），
+  // 不能用固定串 "\"loc\":\"" 去匹配，统一交给容忍空白的 jsonStr。
+  char vbuf[32];
+  if (!jsonStr(body, "loc", vbuf, sizeof(vbuf))) return false;
+
+  String v = vbuf;                           // 例："39.9110,116.3950"
+  int c = v.indexOf(',');
+  if (c < 0) return false;
+  float lat = v.substring(0, c).toFloat();
+  float lon = v.substring(c + 1).toFloat();
+  if (lat == 0 && lon == 0) return false;
+
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%.2f,%.2f", lon, lat);   // 和风要"经度,纬度"
+  locOut = buf;
+  return true;
+}
+
+static String resolveLocation() {
+#if QWEATHER_AUTO_LOCATION
+  Preferences prefs;
+  prefs.begin(NVS_NS, false);
+  String loc = prefs.getString(NVS_LOC, "");
+  if (loc.length() >= 3) {                              // 之前定位过，直接用
+    prefs.end();
+    Serial.printf("[geo] cached location %s\n", loc.c_str());
+    return loc;
+  }
+
+  String found;
+  if (geoLookup(found)) {
+    prefs.putString(NVS_LOC, found);                     // 只缓存成功结果
+    prefs.end();
+    Serial.printf("[geo] auto location -> %s\n", found.c_str());
+    return found;
+  }
+  prefs.end();
+  Serial.println("[geo] auto location failed, fallback to QWEATHER_CITY");
+#endif
+  return String(QWEATHER_CITY);
+}
+
+static void wxCacheSave(const WeatherData& w) {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, false)) return;
+  uint32_t magic = WX_CACHE_MAGIC;
+  prefs.putBytes(NVS_WX_MAGIC, &magic, sizeof(magic));
+  prefs.putBytes(NVS_WX, &w, sizeof(w));
+  prefs.end();
+}
+
+static bool wxCacheLoad(WeatherData& w) {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, true)) return false;
+  uint32_t magic = 0;
+  size_t n = prefs.getBytes(NVS_WX_MAGIC, &magic, sizeof(magic));
+  bool ok = (n == sizeof(magic) && magic == WX_CACHE_MAGIC &&
+             prefs.getBytesLength(NVS_WX) == sizeof(w) &&
+             prefs.getBytes(NVS_WX, &w, sizeof(w)) == sizeof(w));
+  prefs.end();
+  return ok;
+}
+
 // 后台任务：串口这边只有在"拿到数据 / 失败"时各打一行
 static void weatherTask(void*) {
+  // 定位要联网，先等 WiFi
+  while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(1000));
+  g_location = resolveLocation();
+  Serial.printf("[wx] location = %s\n", g_location.c_str());
+
   for (;;) {
     if (WiFi.status() != WL_CONNECTED) {
       vTaskDelay(pdMS_TO_TICKS(5000));
@@ -363,9 +507,13 @@ static void weatherTask(void*) {
       g_wx = w;
       portEXIT_CRITICAL(&g_wxMux);
       g_wxDirty = true;
-      Serial.printf("[wx] %d°C  %s  湿度 %d%%  今日 %d~%d°C  icon %d  heap %u KB\n",
-                    w.temp, w.text, w.hum, w.tmin, w.tmax, w.icon,
-                    (unsigned)(ESP.getFreeHeap() / 1024));
+      wxCacheSave(w);
+      Serial.printf("[wx] %d°C %s 湿度 %d%% | 今 %d/%d 明 %d/%d 后 %d/%d | loc %s | heap %u KB\n",
+                    w.temp, w.text, w.hum,
+                    w.day[0].tmin, w.day[0].tmax,
+                    w.day[1].tmin, w.day[1].tmax,
+                    w.day[2].tmin, w.day[2].tmax,
+                    g_location.c_str(), (unsigned)(ESP.getFreeHeap() / 1024));
       vTaskDelay(pdMS_TO_TICKS(WX_REFRESH_MS));
     } else {
       Serial.println("[wx] fetch failed, retry in 60s");
@@ -449,6 +597,8 @@ static void drawTemp(int value, int x, int cy, int font, int r, uint16_t color) 
   tft.drawCircle(x + w + r + 3, cy - font * 3 / 10, r, color);
 }
 
+static const char* DAY_LABEL[3] = {"TODAY", "TMRW", "DAY2"};
+
 static void drawWeather() {
   WeatherData w;
   portENTER_CRITICAL(&g_wxMux);
@@ -457,6 +607,22 @@ static void drawWeather() {
 
   tft.fillRect(0, WX_Y_TOP, tft.width(), tft.height() - WX_Y_TOP, BG_COLOR);
   tft.drawFastHLine(0, WX_Y_TOP, tft.width(), LINE_COLOR);
+
+  // 顶栏右侧：湿度；断网时改成红色 OFF（表示这是缓存数据）
+  // 注意 TFT_eSPI 的字体 2 只有 ASCII 32..127，写 '°' 会越界取到乱码，所以这里不放度数符号
+  // 先清这一小块：RH 28% 比 OFF 宽，不清会留下残余像素
+  tft.fillRect(226, 6, 58, TOP_BAR_H - 12, BG_COLOR);
+  tft.setTextDatum(MR_DATUM);
+  if (WiFi.status() != WL_CONNECTED) {
+    tft.setTextColor(TFT_RED, BG_COLOR);
+    tft.drawString("OFF", 284, TOP_BAR_H / 2, 2);
+  } else {
+    char hum[12];
+    if (w.valid) snprintf(hum, sizeof(hum), "RH %d%%", w.hum);
+    else         snprintf(hum, sizeof(hum), "RH --");
+    tft.setTextColor(FG_DIM, BG_COLOR);
+    tft.drawString(hum, 284, TOP_BAR_H / 2, 2);
+  }
 
   if (!w.valid) {
     tft.setTextDatum(ML_DATUM);
@@ -469,13 +635,19 @@ static void drawWeather() {
 
   drawTemp(w.temp, 80, WX_Y_TOP + 36, 6, 5, FG_COLOR);
 
-  char buf[24];
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(FG_DIM, BG_COLOR);
-  snprintf(buf, sizeof(buf), "%d°/%d°", w.tmax, w.tmin);
-  tft.drawString(buf, 310, WX_Y_TOP + 20, 2);
-  snprintf(buf, sizeof(buf), "RH %d%%", w.hum);
-  tft.drawString(buf, 310, WX_Y_TOP + 46, 2);
+  // 右侧三行：今天 / 明天 / 后天 的最低温-最高温
+  const int rowY[3] = { WX_Y_TOP + 12, WX_Y_TOP + 34, WX_Y_TOP + 56 };
+  char buf[20];
+  for (int i = 0; i < 3; i++) {
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(i == 0 ? FG_DIM : LINE_COLOR, BG_COLOR);
+    tft.drawString(DAY_LABEL[i], 150, rowY[i], 2);
+
+    snprintf(buf, sizeof(buf), "%d/%d", w.day[i].tmin, w.day[i].tmax);
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextColor(i == 0 ? FG_COLOR : FG_DIM, BG_COLOR);
+    tft.drawString(buf, 310, rowY[i], 2);
+  }
 }
 
 // ============================================================
@@ -596,7 +768,16 @@ void setup() {
   Serial.println("========================================");
 
   displayInit();
-  drawWeather();                 // 先画一次 "waiting"
+
+  // 先把上次成功的数据从 NVS 读出来，断网开机也能立刻显示
+  WeatherData cached;
+  if (wxCacheLoad(cached)) {
+    portENTER_CRITICAL(&g_wxMux);
+    g_wx = cached;
+    portEXIT_CRITICAL(&g_wxMux);
+    Serial.printf("[wx] cached data loaded (stamp %u)\n", (unsigned)cached.stamp);
+  }
+  drawWeather();                 // 没缓存时画 "waiting"，有缓存直接显示
 
   Serial.println("WiFi: starting (non-blocking)");
   WiFi.mode(WIFI_STA);

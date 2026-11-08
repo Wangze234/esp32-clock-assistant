@@ -1,7 +1,7 @@
 # 阶段 3：时钟 + 天气
 
 > 目标：在阶段 2 的时钟上加天气（当前温度 / 天气图标 / 今日高低 / 湿度），并开始做日历。
-> 当前状态：**天气部分已完成并上屏（2026-11-08）；日历部分未做。**
+> 当前状态：**天气部分已完成并上屏（2026-11-08），含自动定位、未来 3 天、NVS 缓存、断网 `OFF` 标记；日历部分未做。**
 > 屏幕配置复用 `../stage1_display/User_Setup.h`，必须先把它覆盖到 TFT_eSPI 库里。
 
 ---
@@ -9,18 +9,21 @@
 ## 0. 这一版做了什么
 
 1. 时钟字体换成**手绘七段数码管**：`fillRoundRect` 画每一笔，只要一点点圆角、整体仍然是方的；时分秒**同一字号**。
-2. 接和风天气：实时天气 + 今日高低温，30 分钟刷新一次（失败 1 分钟后重试）。
+2. 接和风天气：实时天气 + 未来 3 天，30 分钟刷新一次（失败 1 分钟后重试）。
 3. 天气请求跑在**独立 FreeRTOS 任务**（core 0），表盘（core 1）永不被 HTTPS 握手卡住。
+4. 自动定位：用公网出口 IP 查经纬度，结果存 NVS，只查一次。
+5. 天气数据也存 NVS：开机先显示上次数据；断网时顶栏标红色 `OFF`。
 
 ```
 ┌────────────────────────────────────────┐
-│ 11/08  Sun                    ▁▃▅█     │  ← 顶栏 40px：左日期，右 WiFi 图标
+│ 11/08  Sun          RH 29%      ▁▃▅█   │  ← 顶栏 40px：日期 / 湿度 / WiFi 图标
 ├────────────────────────────────────────┤
 │   1 9 : 0 4 : 1 1                      │  ← HH:MM:SS 全同字号（40×84 每字）
 │                                        │
 ├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┤  ← WX_Y_TOP = 168
-│  ☁   7°          -2°/7°                │  ← 图标 / 当前温度 / 今日低~高
-│                  RH 29%                │  ← 湿度
+│  ☁   7°        TODAY      -2/7         │  ← 图标 / 当前温度 / 今日低~高
+│                TMRW       -3/11        │
+│                DAY2       -1/15        │
 └────────────────────────────────────────┘
 ```
 
@@ -32,9 +35,13 @@
 | 开机 | 背光 PWM 淡入约 320ms（`ledcAttach(TFT_BL, 5000, 8)`），不再闪三下 |
 | 想改风格 | 只要改这几个常量：`SEG_R` 设 0 就是纯直角笔画；`SEG_W/SEG_H` 改大小 |
 | 天气图标 | 用圆/线/矩形现画，按和风图标编号分：晴 / 多云 / 阴 / 雨 / 雪 / 雾霾 / 风 |
-| 天气区 | y = 168..240；阶段 4 的室内温湿度也放在这一条（右边两块目前是户外高低温和湿度） |
+| 天气区 | y = 168..240：左侧图标 + 当前温度；右侧三行 `TODAY/TMRW/DAY2`，值是 `低/高`。阶段 4 的室内温湿度再往右挤或另起一行 |
+| 湿度 / 离线 | 顶栏右侧 `RH nn%`；**断网时变成红色 `OFF`**，表示下面显示的是 NVS 里的缓存 |
+| 自动定位 | `ipinfo.io/json` 取 `"loc":"纬度,经度"` → 转成 `"经度,纬度"` 给和风；成功结果存 NVS `loc`，以后开机不再请求 |
+| 缓存 | 每次成功请求把整个 `WeatherData`（含 3 天）存 NVS `wx`；开机先读出来画屏，再等联网刷新 |
 
 > TFT_eSPI 内置字体只有 ASCII，中文（多云/阴/小雨）只打串口，屏幕上用图标 + 数字表达。
+> 小字里**不能写 `'°'`**：字体 2 只有 ASCII 32..127，`'°'`(0xB0) 会越界成乱码。小字统一用 `-2/7`，大号温度用 `drawTemp()` 手绘圆圈。
 
 ---
 
@@ -46,17 +53,24 @@
 #define WIFI_SSID       "……"
 #define WIFI_PASSWORD   "……"
 #define QWEATHER_KEY    "……"                          // 控制台里的 API KEY，32 位
-#define QWEATHER_CITY   "101010100"                    // 北京
+#define QWEATHER_CITY   "101010100"                    // 自动定位失败时的兜底（北京）
 #define QWEATHER_HOST   "xxxxxxxx.re.qweatherapi.com"  // 专属 API Host，不是 devapi
+// 可选：不想自动定位就加这一行，改成 0
+// #define QWEATHER_AUTO_LOCATION 0
 ```
 
 > ⚠️ 2024 之后的和风天气**必须用控制台首页给你的专属 API Host**，
 > 用 `devapi.qweather.com` 会返回 401。请求头用 `X-QW-Api-Key`。
-> 这三项都不能出现在代码里，也不能打印到串口。
+> 这些都不能出现在代码里，也不能打印到串口。
+>
+> 自动定位用 `ipinfo.io`（HTTPS、免费、无需 key）。和风自己的 GeoAPI
+> `/geo/v2/city/lookup` 在本账号是 **403**（套餐没开），所以不走它。
+> 定位结果和天气缓存都在 NVS 命名空间 `clock` 里（键 `loc` / `wx`），
+> 想重新定位：擦除 NVS 或改一次 `NVS_LOC` 的键名。
 
 ---
 
-## 2. 两个必须知道的坑（改代码前先看）
+## 2. 几个必须知道的坑（改代码前先看）
 
 ### 2.1 响应永远是 gzip
 
@@ -76,11 +90,34 @@ tinfl_decompress_mem_to_mem(buf, sizeof(buf), p + off, deflateLen,
 
 8192 时每次请求都会 `Stack canary watchpoint triggered (weather)`，然后整机反复重启（现象是串口每 ~9 秒重新打印一次启动日志）。现在是 `xTaskCreatePinnedToCore(..., 16384, ...)`。
 
+### 2.3 ipinfo.io 的 JSON 是带空格的
+
+和风天气返回紧凑 JSON（`"text":"多云"`），ipinfo.io 返回**美化 JSON**：
+
+```json
+"loc": "39.9110,116.3950"
+```
+
+冒号后有一个空格。用固定串 `"\"loc\":\""` 去找会永远失败（HTTP 却是 200）。
+`jsonStr()` 统一跳过冒号前后的空白/换行，两个服务共用。
+
+### 2.4 字体 2 里没有 `'°'`
+
+TFT_eSPI 内置字体 2/4/6 只有 **ASCII 32..127** 这 96 个字形。`'°'` 是 0xB0，
+会越界取到乱码。所以小字用 `-2/7` 这种格式，大号温度用 `drawTemp()` 手绘圆圈。
+
+### 2.5 顶栏 `RH` 与 `OFF` 切换要清屏
+
+`RH 28%` 比 `OFF` 宽，只画新字会留下旧字左半截。切换前固定
+`fillRect(226, 6, 58, 28, BG_COLOR)` 清掉整块文字区。
+
 ---
 
 ## 3. 烧录与预期输出
 
 Arduino IDE 打开 `stage3_weather.ino`，参数与阶段 0 相同，端口 `/dev/cu.wchusbserial*`，115200。
+
+第一次开机（NVS 里还没有缓存 / 定位）：
 
 ```
 ========================================
@@ -90,12 +127,27 @@ display: 320 x 240
 backlight: fade in (GPIO7 PWM)
 WiFi: starting (non-blocking)
 WiFi: connecting to "……"
-NTP: OK (took 3011 ms since boot)
-WiFi: OK  IP=192.168.1.131  RSSI=-45 dBm
-NTP: re-syncing after reconnect ...
-2026-11-08 19:04:10  周日  RSSI -46 dBm  heap 240 KB
-[wx] 7°C  多云  湿度 29%  今日 -2~7°C  icon 151  heap 240 KB
+NTP: requesting time ...
+WiFi: OK  IP=192.168.1.131  RSSI=-43 dBm
+[geo] auto location -> 116.40,39.91
+[wx] location = 116.40,39.91
+[wx] 6°C 多云 湿度 28% | 今 -2/7 明 -3/11 后 -1/15 | loc 116.40,39.91 | heap 239 KB
+NTP: OK (took 4384 ms since boot)
+2026-11-08 19:38:36  周日  RSSI -45 dBm  heap 239 KB
 ```
+
+之后的每次开机（定位和天气都从 NVS 读，屏幕立刻有数据）：
+
+```
+[wx] cached data loaded (stamp ...)
+...
+[geo] cached location 116.40,39.91
+[wx] location = 116.40,39.91
+[wx] 6°C 多云 湿度 28% | 今 -2/7 明 -3/11 后 -1/15 | loc 116.40,39.91 | heap 239 KB
+```
+
+> 断网开机时不会出现 `[wx] location` 和天气行，屏幕底部显示缓存数据，
+> 顶栏湿度变成红色 `OFF`。
 
 ---
 
@@ -109,6 +161,11 @@ NTP: re-syncing after reconnect ...
 - [x] 天气成功上屏：图标 / 当前温度 / 今日高低 / 湿度
 - [x] 天气失败不影响时钟，60 秒后自动重试
 - [x] 连续运行不再重启（栈 16KB），heap 稳定在 ~240KB
+- [x] 自动定位：无配置城市时也能取到 `116.40,39.91`，与北京数据一致（2026-11-08）
+- [x] 定位结果写 NVS：第二次开机打印 `[geo] cached location ...`，不再请求 ipinfo
+- [x] 未来 3 天上屏（`TODAY/TMRW/DAY2`），实测 `-2/7 -3/11 -1/15`
+- [x] 天气缓存写 NVS：开机先读缓存（串口 `[wx] cached data loaded`），再联网刷新
+- [ ] 断网开机：屏幕显示缓存 + 顶栏红色 `OFF`（代码已实现，需拔网实测一次）
 - [ ] 日历（待做）
 
 ---
@@ -121,12 +178,18 @@ NTP: re-syncing after reconnect ...
 | `[wx] gunzip failed` | 跳 gzip 头的偏移算错，或响应被截断 | 看日志里的 raw 字节数；确认 `off` 跳过了 FEXTRA/FNAME/FCOMMENT/FHCRC |
 | `[wx] http 401` | API Host 不是专属域名 / key 错 | 用控制台首页的 `xxxx.re.qweatherapi.com`，不要用 `devapi` |
 | `[wx] http 403` / `unexpected body` | 请求头不对 | 用 `X-QW-Api-Key`，不要拼 `?key=` 参数 |
-| 屏幕底部一直 `weather: waiting...` | 还没联网，或第一次请求失败 | 看串口有没有 `[wx] fetch failed`，60 秒后会自动重试 |
+| `[geo] auto location failed` | ipinfo 不通，或 JSON 里找不到 `loc` | 先看有没有 `[geo] ipinfo http 4xx/5xx`；解析现在容忍空格，若 ipinfo 改格式就更新 `jsonStr()` 的键名 |
+| 屏幕小字出现乱码/方块 | 小字里写了 `'°'` | 字体 2 只有 ASCII 32..127；改用 `-2/7`，大号"度"用手绘圆圈 |
+| 顶栏残留 `H 28` | `RH 28%` 切成 `OFF` 时没清旧字 | 切换前 `fillRect(226, 6, 58, 28, BG_COLOR)` |
+| `[wx] 3d: less than 3 days` | 3 天接口返回少于 3 段 | 检查 `"fxDate"` 出现次数；接口失败时整次刷新作废，保留旧数据 |
+| 屏幕底部一直 `weather: waiting...` | 还没联网，NVS 里也没有缓存 | 看串口有没有 `[wx] fetch failed`，60 秒后会自动重试；成功一次后以后开机就有缓存 |
 | 时间显示 `11:02` 而本地是 `19:02` | WiFi 刚连上、`configTime` 还没生效的那几秒 | 正常现象，NTP 同步完成后自动跳到本地时间 |
 
 ---
 
 ## 6. 下一步
 
+- **天气部分已收尾**：自动定位 / 3 天 / NVS 缓存 / `OFF` 标记都在本目录实现。
+- 待实测项：拔掉路由器后开机，确认屏幕显示缓存数据、顶栏变 `OFF`（见 §4）。
 - 日历：按 README §4 阶段 3 的验收要求补（公历日期已在顶栏；要做的是农历/节气或月视图，需要中文字库 → 也可以顺延到阶段 5 用 LVGL 字库一起做）。
 - 阶段 4：AHT20 温湿度 + 备电 RTC，室内数据放到天气区右侧。
