@@ -16,3 +16,7 @@ firmware/**/build/
 # IDE / 编辑器
 .vscode/
 .arduinoIDE/
+
+# Python 生成脚本缓存
+__pycache__/
+*.pyc

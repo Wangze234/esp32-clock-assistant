@@ -617,21 +617,14 @@ static void drawTemp(int value, int x, int cy, int font, int r, uint16_t color) 
 
 // ============================================================
 // 天气区小字：14px 圆角字库（wx_font.h）
-// 掩码是 8-bit alpha，按当前前景色和背景色现场混合，边缘不锯齿
+// 1-bit 硬边掩码，只画笔画像素（背景块由 drawWeather 统一清屏），
+// 不做灰度抗锯齿——14px 下灰边在屏上会像"阴影"
 // ============================================================
 static void wxDrawGlyph(const WxGlyph& g, int x, int y, uint16_t fg) {
-  uint16_t line[WX_FONT_W];
-  uint16_t fr = (fg >> 11) & 0x1F, fgc = (fg >> 5) & 0x3F, fb = fg & 0x1F;
-  uint16_t br = (BG_COLOR >> 11) & 0x1F, bgc = (BG_COLOR >> 5) & 0x3F, bb = BG_COLOR & 0x1F;
   for (int row = 0; row < WX_FONT_H; row++) {
     for (int col = 0; col < g.adv; col++) {
-      uint8_t a = g.m[row * WX_FONT_W + col];
-      uint16_t r  = (fr  * a + br  * (255 - a)) / 255;
-      uint16_t gg = (fgc * a + bgc * (255 - a)) / 255;
-      uint16_t b  = (fb  * a + bb  * (255 - a)) / 255;
-      line[col] = (r << 11) | (gg << 5) | b;
+      if (g.m[row * WX_FONT_W + col]) tft.drawPixel(x + col, y + row, fg);
     }
-    tft.pushImage(x, y + row, g.adv, 1, line);
   }
 }
 

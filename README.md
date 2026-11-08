@@ -473,8 +473,9 @@ MSP2807 背面有一个焊盘跳线 **J1**，决定板载 XC6206 LDO 是否被�
 | 31 | 用固定串 `"loc":"` 解析 ipinfo.io 返回 | 一直 `auto location failed`，但 HTTP 是 200；日志里 body 只有 265 字节、首字符 `{` | ipinfo 返回的是**美化 JSON**（`"loc": "39.9110,116.3950"`，冒号后有空格）。解析时跳过冒号前后的空白/换行，或统一用容忍空白的 `jsonStr()` |
 | 32 | 小字号里用 `'°'` 当温度单位 | 屏幕出现乱码方块，甚至盖住旁边的字 | TFT_eSPI 内置字体 2/4/6 只有 **ASCII 32..127**（96 个字形），`'°'`(0xB0) 越界。小字改用 `-2/7` 这种纯数字格式；要大号"度"就手绘小圆圈（`drawTemp()`） |
 | 33 | 顶栏文字从长串切成短串时只重画新字 | 从 `RH 28%` 切到 `OFF` 后，左边残留 `H 28` 的像素 | 这段文字是**不透明**画的，短串盖不住长串。切换前先 `fillRect()` 清掉整个文字区（本机 x=226..284、y=6..34） |
-| 34 | 想用 TFT_eSPI 内置字体显示中文 | 内置字体 2/4/6 只有 ASCII，中文画不出来；LVGL 字库又太重 | 只需少量汉字时，用 Pillow 从系统圆角字渲染成 8-bit alpha 掩码，生成迷你字库（本机 `tools/gen_wx_font.py` → `wx_font.h`，14px、16 字形约 3.4KB），运行时按前景/背景色混合 |
+| 34 | 想用 TFT_eSPI 内置字体显示中文 | 内置字体 2/4/6 只有 ASCII，中文画不出来；LVGL 字库又太重 | 只需少量汉字时，用 Pillow 从系统圆角字渲染成 **1-bit 掩码**，生成迷你字库（本机 `tools/gen_wx_font.py` → `wx_font.h`，14px、16 字形约 3.4KB），固件只画笔画像素 |
 | 35 | 天气任务和 NTP 同时发 DNS | 偶发 `assert failed: udp_new_ip_type ... Required to lock TCPIP core functionality!` 后整机重启，backtrace 在 `sntp_dns_found → dns_gethostbyname` | 串行化：记录 `configTime()` 时刻，天气任务首次等 NTP 对时完成（最多 15s）再请求，之后每次 `configTime()` 的 8 秒内不发请求 |
+| 36 | 小字号中文用灰度抗锯齿 | 笔画周围一圈半透明灰边，在屏上看着像**字体阴影/发虚** | ≤14px 时按 α≥128 二值化成 1-bit 掩码；圆角仍由字体形状保证，不需要灰度边缘 |
 
 ---
 
@@ -568,5 +569,6 @@ esp32-clock-assistant/
 | 2026-11-08 | 阶段 3 | **上一条作废**：冒号居中 + "1" 居中已回退 | ⏪ | 实测观感不如原版（"1" 居中后七段字变形、整体节奏怪），按用户意见回退：`1` 仍贴字框右边、冒号点保持 `x + SEG_COLON/2 - 3`。编译产物 1087122 字节，与那版一致 |
 | 2026-11-08 | 阶段 3 | 天气自动定位（ipinfo.io → 经纬度） | ✅ | 和风 GeoAPI `/geo/v2/city/lookup` 在本账号返回 **403**（套餐没开），改走 `https://ipinfo.io/json` 取 `"loc":"纬度,经度"`，再转成和风要的 `经度,纬度`（两位小数）。实测 `[wx] location = 116.40,39.91`，天气与北京 `101010100` 一致；定位结果写入 NVS，第二次开机打印 `[geo] cached location 116.40,39.91`，不再请求 ipinfo。解析坑见 §6 #31 |
 | 2026-11-08 | 阶段 3 | 天气 NVS 缓存 + 3 天预报 + 离线标记 | ✅ | `WeatherData` 整体 `putBytes/getBytesLength` 存 NVS（带 magic），开机先读缓存再画，断网重启也能立刻显示；顶栏湿度 `RH nn%`，断网时变红色 `OFF`（表示数据来自缓存）。底部右侧三行 `TODAY/TMRW/DAY2` 显示未来 3 天 `低/高`，实测 `今 -2/7 明 -3/11 后 -1/15`。小字用 `-2/7` 而不是 `-2°/7°`，原因见 §6 #32 |
-| 2026-11-08 | 阶段 3 | 三天预报改中文圆角小字 | ✅ | 英文 `TODAY/TMRW/DAY2` → `今天/明天/后天`，字号从字体 2（16px）降到 **14px**。新增 `tools/gen_wx_font.py`：用 Pillow + ヒラギノ丸ゴ渲染 16 个字形（今天明后/0-9//-）成 8-bit alpha 掩码，生成 `wx_font.h`（约 3.4KB），`wxDrawGlyph()` 按前景/背景色混合后逐行 `pushImage`。固件 1103182 字节（35%），见 §6 #34 |
+| 2026-11-08 | 阶段 3 | 三天预报改中文圆角小字 | ✅ | 英文 `TODAY/TMRW/DAY2` → `今天/明天/后天`，字号从字体 2（16px）降到 **14px**。新增 `tools/gen_wx_font.py`：用 Pillow + ヒラギノ丸ゴ渲染 16 个字形（今天明后/0-9//-），生成 `wx_font.h`（约 3.4KB），`wxDrawGlyph()` 只画笔画像素。固件 1101594 字节（35%），见 §6 #34 |
+| 2026-11-08 | 阶段 3 | 中文小字"阴影" | ✅ | 第一版用 8-bit 灰度抗锯齿，14px 下笔画周围的半透明灰边在屏上看着像阴影。改为 **α≥128 二值化 1-bit 掩码**，`drawPixel` 只画笔画像素，不再逐行 `pushImage` 混合背景。圆角仍由字体形状保证，见 §6 #36 |
 | 2026-11-08 | 阶段 3 | 修复 SNTP 与天气并发 DNS 导致的偶发重启 | ✅ | 现象：烧录后偶发 `assert failed: udp_new_ip_type ... Required to lock TCPIP core functionality!` 并重启，backtrace `sntp_dns_found → dns_gethostbyname`。根因：WiFi 刚连上时 `configTime()` 让 SNTP 解析 NTP 域名，天气任务同时解析和风域名。改为记录 `g_ntpSyncAt`：首次请求等 NTP 对时完成（最多 15s）+ 2s，之后每次 `configTime()` 后 8s 内不请求。复测 25s 无重启，见 §6 #35 |

@@ -2,9 +2,10 @@
 """
 生成天气区用的迷你字库 wx_font.h。
 
-只包含 16 个字符：今天明天后天 0-9 / -
+只包含 16 个字符：今天明后 0-9 / -
 用 macOS 自带的ヒラギノ丸ゴ（Hiragino Maru Gothic ProN，圆角日文字体）
-在 14px 下渲染成 8-bit alpha 掩码，固件里再按前景色/背景色混合。
+在 14px 下渲染，然后按 alpha≥128 二值化成 1-bit 掩码。
+不做灰度抗锯齿：14px 下灰边在屏上会像"阴影"，硬边更清楚。
 
 用法：
     python3 tools/gen_wx_font.py > wx_font.h
@@ -29,12 +30,13 @@ def mask_of(ch):
     crop = img.crop((BASELINE_X, BASELINE_Y - 12,
                      BASELINE_X + CELL_W, BASELINE_Y + 3))
     adv = int(round(f.getlength(ch)))
-    return adv, list(crop.getdata())
+    # 二值化：只要覆盖超过一半就算笔画，避免灰边像阴影
+    return adv, [1 if v >= 128 else 0 for v in crop.tobytes()]
 
 
 def main():
     print("// 自动生成，勿手改：tools/gen_wx_font.py")
-    print("// 14px ヒラギノ丸ゴ ProN W4，仅含 今天明天后天 0-9 / -")
+    print("// 14px ヒラギノ丸ゴ ProN W4，1-bit 硬边，仅含 今天明后 0-9 / -")
     print("#pragma once")
     print("#include <stdint.h>")
     print()
