@@ -661,6 +661,20 @@ static void wxDrawDayLabel(int i, int x, int y, uint16_t fg) {
   }
 }
 
+// 字库索引：周=21 日=22 一=23 二=24 三=25 四=26 五=27 六=28
+// 下标与 struct tm 的 tm_wday 一致：0=周日
+static const uint8_t WEEKDAY_IDX[7][2] = {
+  {21, 22}, {21, 23}, {21, 24}, {21, 25}, {21, 26}, {21, 27}, {21, 28}
+};
+
+static void wxDrawWeekday(int wday, int x, int y, uint16_t fg) {
+  for (int k = 0; k < 2; k++) {
+    const WxGlyph& g = WX_GLYPHS[WEEKDAY_IDX[wday % 7][k]];
+    wxDrawGlyph(g, x, y, fg);
+    x += g.adv + 1;
+  }
+}
+
 static void drawWeather() {
   WeatherData w;
   portENTER_CRITICAL(&g_wxMux);
@@ -795,13 +809,16 @@ static void updateClock() {
 
   static char lastTop[20] = "";
   char top[20];
-  strftime(top, sizeof(top), "%m/%d  %a", &t);
+  strftime(top, sizeof(top), "%m/%d", &t);
   if (strcmp(top, lastTop) != 0) {
     strcpy(lastTop, top);
     tft.fillRect(0, 0, 180, TOP_BAR_H - 1, BG_COLOR);
     tft.setTextDatum(ML_DATUM);
     tft.setTextColor(FG_DIM, BG_COLOR);
     tft.drawString(top, 10, TOP_BAR_H / 2, 2);
+    // 星期用 14px 中文小字，紧跟日期之后（字体 2 只有 ASCII，没有"周一"）
+    int wdayX = 10 + tft.textWidth(top, 2) + 8;
+    wxDrawWeekday(t.tm_wday % 7, wdayX, TOP_BAR_H / 2 - 7, FG_DIM);
   }
 
   // 秒和时分用同一个大字号，整行 HH:MM:SS 居中

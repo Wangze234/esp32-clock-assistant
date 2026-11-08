@@ -2,7 +2,7 @@
 """
 生成天气区用的迷你字库 wx_font.h。
 
-只包含 21 个字符：今天明后 0-9 / - 湿度%离线
+只包含 29 个字符：今天明后 0-9 / - 湿度%离线 周日一二三四五六
 用 macOS 自带的ヒラギノ丸ゴ（Hiragino Maru Gothic ProN，圆角日文字体）
 在 14px 下渲染，然后按 alpha≥128 二值化成 1-bit 掩码。
 不做灰度抗锯齿：14px 下灰边在屏上会像"阴影"，硬边更清楚。
@@ -19,8 +19,9 @@ CELL_W, CELL_H = 14, 15       # 基线 -12 .. +2，整数像素
 BASELINE_X, BASELINE_Y = 8, 20  # 画布内基线位置
 
 # 天只存一次，标签里复用（今天 / 明天 / 后天）
-# 末尾追加顶栏用的 湿 度 % 离 线（索引见 wxGlyphIndex）
-CHARS = "今天明后" + "0123456789" + "/-" + "湿度%离线"
+# 末尾追加顶栏用的 湿 度 % 离 线，以及星期 周 日 一 二 三 四 五 六
+# （中文用显式索引，不走 wxGlyphIndex）
+CHARS = "今天明后" + "0123456789" + "/-" + "湿度%离线" + "周日一二三四五六"
 
 
 def mask_of(ch):
@@ -37,7 +38,8 @@ def mask_of(ch):
 
 def main():
     print("// 自动生成，勿手改：tools/gen_wx_font.py")
-    print("// 14px ヒラギノ丸ゴ ProN W4，1-bit 硬边，仅含 今天明后 0-9 / - 湿度%离线")
+    print("// 14px ヒラギノ丸ゴ ProN W4，1-bit 硬边，"
+          "仅含 今天明后 0-9 / - 湿度%离线 周日一二三四五六")
     print("#pragma once")
     print("#include <stdint.h>")
     print()
@@ -58,6 +60,8 @@ def main():
     print()
     print("// 索引：今天明后 = 0..3，'0'..'9' = 4..13，'/' = 14，'-' = 15，")
     print("//       湿 = 16，度 = 17，'%' = 18，离 = 19，线 = 20")
+    print("//       周 = 21，日 = 22，一 = 23，二 = 24，三 = 25，四 = 26，")
+    print("//       五 = 27，六 = 28")
     print("static inline int wxGlyphIndex(char c) {")
     print("  if (c >= '0' && c <= '9') return 4 + (c - '0');")
     print("  if (c == '/') return 14;")
