@@ -285,11 +285,11 @@ Free heap : 3xx KB
 
 | 项目 | 结果 |
 |---|---|
-| 完成日期 | |
-| CH343 驱动版本 | |
-| Arduino IDE 版本 | |
-| esp32 支持包版本 | |
-| 编译 Blink 是否通过 | |
-| 板子到货后自检输出 | |
+| 完成日期 | 2026-11-08 |
+| CH343 驱动版本 | `cn.wch.CH34xVCPDriver 1.0`（已 activated enabled）；串口 `/dev/cu.wchusbserial5D4D0989291` |
+| Arduino IDE 版本 | 2.3.10（另有内置 arduino-cli 1.5.1） |
+| esp32 支持包版本 | 3.3.12 |
+| 编译 Blink 是否通过 | ✅ |
+| 板子到货后自检输出 | ESP32-S3 rev 2 / 2 cores / 240MHz / Flash 16MB / PSRAM 8MB (free 8188KB) / Heap 348KB |
 
 > 完成后告诉我，我会更新 README 的 §0 状态和 §8 日志，然后进入阶段 1：点亮屏幕。
