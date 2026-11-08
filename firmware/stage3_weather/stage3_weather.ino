@@ -63,12 +63,15 @@ static const uint16_t LINE_COLOR = 0x8410;
 //  40 ├──────────────────────────────┤
 //      │        大号时间 HH:MM  :SS    │ 48..152
 // 168  ├ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─┤
-//      │  ☀    8°        12°/2°        │ 天气区 168..240
-//      │                  RH 45%       │
+//      │  ☁   7°     预留    今天  -2/7 │ 天气区 168..240
+//      │                        明天  -3/11│
+//      │                        后天  -1/15│
 //  240 └──────────────────────────────┘
 static const int TOP_BAR_H = 40;
 static const int CLOCK_Y   = 104;   // 40..168 这段的中心，字高 84
 static const int WX_Y_TOP  = 168;
+// 三天标签的左边 x。往右挪到 210，中间 150..210 空出来留给后续图标
+static const int WX_DAY_LABEL_X = 210;
 
 static const char* WEEKDAY_CN[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
 
@@ -698,7 +701,7 @@ static void drawWeather() {
   const int rowY[3] = { WX_Y_TOP + 12, WX_Y_TOP + 34, WX_Y_TOP + 56 };
   char buf[20];
   for (int i = 0; i < 3; i++) {
-    wxDrawDayLabel(i, 150, rowY[i] - 7, i == 0 ? FG_DIM : LINE_COLOR);
+    wxDrawDayLabel(i, WX_DAY_LABEL_X, rowY[i] - 7, i == 0 ? FG_DIM : LINE_COLOR);
 
     snprintf(buf, sizeof(buf), "%d/%d", w.day[i].tmin, w.day[i].tmax);
     int tw = wxTextWidth(buf);
