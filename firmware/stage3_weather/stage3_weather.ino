@@ -114,7 +114,7 @@ static void wifiService() {
       Serial.println(g_timeWasValid ? "NTP: re-syncing after reconnect ..."
                                     : "NTP: requesting time ...");
       g_statusDirty = true;
-      g_wxDirty = true;        // 顶栏的 OFF 要恢复成 RH
+      g_wxDirty = true;        // 顶栏的"离线"要恢复成"湿度"
     }
     return;
   }
@@ -123,7 +123,7 @@ static void wifiService() {
     g_wasConnected = false;
     Serial.printf("[wifi] lost (status %d)\n", WiFi.status());
     g_statusDirty = true;
-    g_wxDirty = true;          // 顶栏的 RH 要变成 OFF
+    g_wxDirty = true;          // 顶栏的"湿度"要变成"离线"
   }
 
   uint32_t now = millis();
@@ -670,20 +670,24 @@ static void drawWeather() {
   tft.fillRect(0, WX_Y_TOP, tft.width(), tft.height() - WX_Y_TOP, BG_COLOR);
   tft.drawFastHLine(0, WX_Y_TOP, tft.width(), LINE_COLOR);
 
-  // 顶栏右侧：湿度；断网时改成红色 OFF（表示这是缓存数据）
-  // 注意 TFT_eSPI 的字体 2 只有 ASCII 32..127，写 '°' 会越界取到乱码，所以这里不放度数符号
-  // 先清这一小块：RH 28% 比 OFF 宽，不清会留下残余像素
-  tft.fillRect(226, 6, 58, TOP_BAR_H - 12, BG_COLOR);
-  tft.setTextDatum(MR_DATUM);
+  // 顶栏右侧：湿度；断网时红色"离线"（表示下面显示的是缓存数据）
+  // 用 14px 中文小字，右对齐到 284；先清整块（最宽 湿度 100% 约 x=210..284），
+  // 否则从"湿度 28%"切到"离线"会残留旧字
+  tft.fillRect(206, 6, 80, TOP_BAR_H - 12, BG_COLOR);
+  const int topY = TOP_BAR_H / 2 - 7;      // 14px 字高 15，基线对齐顶栏中线
   if (WiFi.status() != WL_CONNECTED) {
-    tft.setTextColor(TFT_RED, BG_COLOR);
-    tft.drawString("OFF", 284, TOP_BAR_H / 2, 2);
+    int lx = 284 - (14 + 1 + 14);          // "离线" 宽 29
+    wxDrawGlyph(WX_GLYPHS[19], lx, topY, TFT_RED);
+    wxDrawGlyph(WX_GLYPHS[20], lx + 15, topY, TFT_RED);
   } else {
     char hum[12];
-    if (w.valid) snprintf(hum, sizeof(hum), "RH %d%%", w.hum);
-    else         snprintf(hum, sizeof(hum), "RH --");
-    tft.setTextColor(FG_DIM, BG_COLOR);
-    tft.drawString(hum, 284, TOP_BAR_H / 2, 2);
+    if (w.valid) snprintf(hum, sizeof(hum), "%d%%", w.hum);
+    else         snprintf(hum, sizeof(hum), "--");
+    int vw = wxTextWidth(hum);
+    int lx = 284 - vw - 3 - (14 + 1 + 14);   // "湿度" 宽 29
+    wxDrawGlyph(WX_GLYPHS[16], lx, topY, FG_DIM);
+    wxDrawGlyph(WX_GLYPHS[17], lx + 15, topY, FG_DIM);
+    wxDrawText(hum, 284 - vw, topY, FG_DIM);
   }
 
   if (!w.valid) {
