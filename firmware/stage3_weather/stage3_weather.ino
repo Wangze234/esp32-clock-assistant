@@ -33,6 +33,7 @@
 #include <miniz.h>          // ROM 里的 tinfl，用来解 gzip（见 wxGet 注释）
 
 #include "secrets.h"
+#include "wx_font.h"        // 天气区小字：14px 圆角中文（生成脚本见 tools/gen_wx_font.py）
 
 // Arduino 会把自动生成的函数原型插在 include 之后、正文之前，
 // 用到自定义结构体做参数时，必须先在这里前置声明，否则 "WeatherData not declared"
@@ -81,6 +82,7 @@ static bool     g_timeWasValid = false;
 static uint32_t g_attemptAt    = 0;
 static uint32_t g_nextTryAt    = 0;
 static uint32_t g_bootAt       = 0;
+static volatile uint32_t g_ntpSyncAt = 0;   // 最近一次 configTime 的时刻
 static bool     g_statusDirty  = true;
 // 天气区需要重画的标记（WiFi 状态变化 / 拿到新数据时置位）
 static volatile bool g_wxDirty = true;
@@ -105,6 +107,7 @@ static void wifiService() {
       Serial.printf("WiFi: OK  IP=%s  RSSI=%d dBm\n",
                     WiFi.localIP().toString().c_str(), WiFi.RSSI());
       configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP1, NTP2, NTP3);
+      g_ntpSyncAt = millis();
       Serial.println(g_timeWasValid ? "NTP: re-syncing after reconnect ..."
                                     : "NTP: requesting time ...");
       g_statusDirty = true;
@@ -492,12 +495,27 @@ static bool wxCacheLoad(WeatherData& w) {
 static void weatherTask(void*) {
   // 定位要联网，先等 WiFi
   while (WiFi.status() != WL_CONNECTED) vTaskDelay(pdMS_TO_TICKS(1000));
+
+  // 等 NTP 对时完成（最多 15 秒），再让 SNTP 的 DNS 先收尾。
+  // core 3.3.12 里 SNTP 解析 ntp.aliyun.com 的同时天气任务也发 DNS 请求，
+  // 偶发 "assert failed: udp_new_ip_type ... Required to lock TCPIP core functionality!"
+  // 然后整机重启（backtrace 落在 sntp_dns_found -> dns_gethostbyname）。
+  for (int i = 0; i < 15 && time(nullptr) < TIME_VALID_SINCE; i++)
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  vTaskDelay(pdMS_TO_TICKS(2000));
+
   g_location = resolveLocation();
   Serial.printf("[wx] location = %s\n", g_location.c_str());
 
   for (;;) {
     if (WiFi.status() != WL_CONNECTED) {
       vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    // 重连后 configTime 也会重新发起 DNS；这 8 秒内不碰网络，避免再次撞上
+    if (millis() - g_ntpSyncAt < 8000) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
 
@@ -597,7 +615,55 @@ static void drawTemp(int value, int x, int cy, int font, int r, uint16_t color) 
   tft.drawCircle(x + w + r + 3, cy - font * 3 / 10, r, color);
 }
 
-static const char* DAY_LABEL[3] = {"TODAY", "TMRW", "DAY2"};
+// ============================================================
+// 天气区小字：14px 圆角字库（wx_font.h）
+// 掩码是 8-bit alpha，按当前前景色和背景色现场混合，边缘不锯齿
+// ============================================================
+static void wxDrawGlyph(const WxGlyph& g, int x, int y, uint16_t fg) {
+  uint16_t line[WX_FONT_W];
+  uint16_t fr = (fg >> 11) & 0x1F, fgc = (fg >> 5) & 0x3F, fb = fg & 0x1F;
+  uint16_t br = (BG_COLOR >> 11) & 0x1F, bgc = (BG_COLOR >> 5) & 0x3F, bb = BG_COLOR & 0x1F;
+  for (int row = 0; row < WX_FONT_H; row++) {
+    for (int col = 0; col < g.adv; col++) {
+      uint8_t a = g.m[row * WX_FONT_W + col];
+      uint16_t r  = (fr  * a + br  * (255 - a)) / 255;
+      uint16_t gg = (fgc * a + bgc * (255 - a)) / 255;
+      uint16_t b  = (fb  * a + bb  * (255 - a)) / 255;
+      line[col] = (r << 11) | (gg << 5) | b;
+    }
+    tft.pushImage(x, y + row, g.adv, 1, line);
+  }
+}
+
+static int wxTextWidth(const char* s) {
+  int w = 0;
+  while (*s) {
+    int i = wxGlyphIndex(*s++);
+    if (i >= 0) w += WX_GLYPHS[i].adv + 1;
+  }
+  return w > 0 ? w - 1 : 0;
+}
+
+static void wxDrawText(const char* s, int x, int y, uint16_t fg) {
+  while (*s) {
+    int i = wxGlyphIndex(*s++);
+    if (i < 0) continue;
+    const WxGlyph& g = WX_GLYPHS[i];
+    wxDrawGlyph(g, x, y, fg);
+    x += g.adv + 1;
+  }
+}
+
+// 字库索引：今=0 天=1 明=2 后=3
+static const uint8_t DAY_CN[3][2] = {{0, 1}, {2, 1}, {3, 1}};   // 今天 / 明天 / 后天
+
+static void wxDrawDayLabel(int i, int x, int y, uint16_t fg) {
+  for (int k = 0; k < 2; k++) {
+    const WxGlyph& g = WX_GLYPHS[DAY_CN[i][k]];
+    wxDrawGlyph(g, x, y, fg);
+    x += g.adv + 1;
+  }
+}
 
 static void drawWeather() {
   WeatherData w;
@@ -635,18 +701,15 @@ static void drawWeather() {
 
   drawTemp(w.temp, 80, WX_Y_TOP + 36, 6, 5, FG_COLOR);
 
-  // 右侧三行：今天 / 明天 / 后天 的最低温-最高温
+  // 右侧三行：今天 / 明天 / 后天 的最低温-最高温（14px 圆角小字，顶部 = 中心 y - 7）
   const int rowY[3] = { WX_Y_TOP + 12, WX_Y_TOP + 34, WX_Y_TOP + 56 };
   char buf[20];
   for (int i = 0; i < 3; i++) {
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(i == 0 ? FG_DIM : LINE_COLOR, BG_COLOR);
-    tft.drawString(DAY_LABEL[i], 150, rowY[i], 2);
+    wxDrawDayLabel(i, 150, rowY[i] - 7, i == 0 ? FG_DIM : LINE_COLOR);
 
     snprintf(buf, sizeof(buf), "%d/%d", w.day[i].tmin, w.day[i].tmax);
-    tft.setTextDatum(MR_DATUM);
-    tft.setTextColor(i == 0 ? FG_COLOR : FG_DIM, BG_COLOR);
-    tft.drawString(buf, 310, rowY[i], 2);
+    int tw = wxTextWidth(buf);
+    wxDrawText(buf, 310 - tw, rowY[i] - 7, i == 0 ? FG_COLOR : FG_DIM);
   }
 }
 

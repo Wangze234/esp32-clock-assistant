@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""
+生成天气区用的迷你字库 wx_font.h。
+
+只包含 16 个字符：今天明天后天 0-9 / -
+用 macOS 自带的ヒラギノ丸ゴ（Hiragino Maru Gothic ProN，圆角日文字体）
+在 14px 下渲染成 8-bit alpha 掩码，固件里再按前景色/背景色混合。
+
+用法：
+    python3 tools/gen_wx_font.py > wx_font.h
+（字体缺失时换 FONT 路径；需要 Pillow）
+"""
+from PIL import Image, ImageDraw, ImageFont
+
+FONT = "/System/Library/Fonts/ヒラギノ丸ゴ ProN W4.ttc"
+PX = 14
+CELL_W, CELL_H = 14, 15       # 基线 -12 .. +2，整数像素
+BASELINE_X, BASELINE_Y = 8, 20  # 画布内基线位置
+
+# 天只存一次，标签里复用（今天 / 明天 / 后天）
+CHARS = "今天明后" + "0123456789" + "/-"
+
+
+def mask_of(ch):
+    f = ImageFont.truetype(FONT, PX)
+    img = Image.new("L", (40, 40), 0)
+    d = ImageDraw.Draw(img)
+    d.text((BASELINE_X, BASELINE_Y), ch, font=f, fill=255, anchor="ls")
+    crop = img.crop((BASELINE_X, BASELINE_Y - 12,
+                     BASELINE_X + CELL_W, BASELINE_Y + 3))
+    adv = int(round(f.getlength(ch)))
+    return adv, list(crop.getdata())
+
+
+def main():
+    print("// 自动生成，勿手改：tools/gen_wx_font.py")
+    print("// 14px ヒラギノ丸ゴ ProN W4，仅含 今天明天后天 0-9 / -")
+    print("#pragma once")
+    print("#include <stdint.h>")
+    print()
+    print("#define WX_FONT_W %d" % CELL_W)
+    print("#define WX_FONT_H %d" % CELL_H)
+    print()
+    print("struct WxGlyph { uint8_t adv; uint8_t m[WX_FONT_W * WX_FONT_H]; };")
+    print()
+    print("static const WxGlyph WX_GLYPHS[] = {")
+    for ch in CHARS:
+        adv, px = mask_of(ch)
+        print("  { %d, {" % adv)
+        for row in range(CELL_H):
+            vals = px[row * CELL_W:(row + 1) * CELL_W]
+            print("    " + ", ".join("%3d" % v for v in vals) + ",")
+        print("  } },")
+    print("};")
+    print()
+    print("// 索引：今天明天后天 = 0..3，'0'..'9' = 4..13，'/' = 14，'-' = 15")
+    print("static inline int wxGlyphIndex(char c) {")
+    print("  if (c >= '0' && c <= '9') return 4 + (c - '0');")
+    print("  if (c == '/') return 14;")
+    print("  if (c == '-') return 15;")
+    print("  return -1;")
+    print("}")
+
+
+if __name__ == "__main__":
+    main()
